@@ -24,3 +24,7 @@ KEC_Scratch/
 # mac artifacts
 **.DS_Store
 
+.positai
+rosm.cache/
+dashboard/rsconnect/
+
