@@ -9,7 +9,9 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 #load all packages and themes
 source("src/setup_libraries.R")
-
+source("src/setup_ross_theme.R")
+source("src/collation/load_sensor_data.R")
+source("src/collation/load_grab_sample_data.R")
 ```
 
 Re run workflow design prior to this to load `data/sensors/uclp_sensor_raw.parquet` as needed
@@ -17,9 +19,9 @@ Re run workflow design prior to this to load `data/sensors/uclp_sensor_raw.parqu
 ## Load raw data
 
 ```{r}
-list.files(path = here("data", "upper_clp_dss" , "sensor"), pattern = ".parquet", full.names = T)
+sensor_data <- load_sensor_data()%>%
+  filter(site %in% c("pbr_fc", "pbr", "pman", "pman_fc") & year(DT_round) == 2025)
 
-all_data_raw <- read_parquet("data/upper_clp_dss/sensor/uclp_sensor_raw_2025-03-26_2025-07-09.parquet")
 
 ```
 
@@ -27,100 +29,340 @@ all_data_raw <- read_parquet("data/upper_clp_dss/sensor/uclp_sensor_raw_2025-03-
 
 ```{r}
 
-  
-  water_chem <- read_parquet("data/upper_clp_dss/modeling/ROSS_FC_water_chemistry.parquet")%>%
-  mutate(DT_round_MT = with_tz(round_date(DT_sample, unit = "1 hour" ), tz = "America/Denver"))%>%
-  rename(site = site_code)%>%
-  select(site, DT_round_MT, ChlA, SC, lab_turb)
-
-#toc_max <- max(water_chem$TOC, na.rm = T)
+water_chem <- load_grab_sample_data()%>%
+  filter(site_code %in% c("pbr", "pbr_fc", "pman", "pman_fc") & year(DT_sample) == 2025)%>%
+  mutate(DT_sample = force_tz(DT_sample, tz = "MST"))
 
 ```
 
 # Comparison Plots
 
+## Function
+
 ```{r}
-subset <- all_data_raw %>% 
-  filter(!is.na(mean),
-         site %in% c("pbr", "pbr_fc"),
-         parameter %nin% c("FDOM Fluorescence", "ORP", "Depth"))%>%
-  mutate(site = ifelse(site == "pbr", "PBR ROSS", "PBR FC"))
-
-parameters = unique(subset$parameter)
-plot_list <- list()
-
-
-units_table <- data.frame(parameter = c("Turbidity", "pH", "ChlA", "Specific Conductivity", "DO", "Temperature"),
+create_comparison_plots <- function(sensor_df = sensor_data, water_chem_df = water_chem,
+                                    param = "Turbidity", site_sel = "pbr", data_col = "mean",
+                                    start_dt = ymd("2025-04-01", tz = "MST"), end_dt = ymd("2025-11-30", tz = "MST")){
+  
+    units_table <- data.frame(parameter = c("Turbidity", "pH", "Chl-a Fluorescence", "Specific Conductivity", "DO", "Temperature"),
                             units = c("NTU", "pH", "RFU", "uS/cm", "mg/L", "C"), 
-                          param_w_units = c("Turbidity (NTU)", "pH", "ChlA (RFU)", "Specific Conductivity (uS/cm)", "DO (mg/L)", "Temperature ( C )"))
-
-for(param in parameters){
+                            param_w_units = c("Turbidity (NTU)", "pH", "ChlA (RFU)", "Specific Conductivity (uS/cm)", "DO (mg/L)", "Temperature ( C )"), 
+                            lower_bound = c(0, 6, 0, 0, 6, -5),
+                            upper_bound = c(1000, 11, 20, 150, 15, 30))
   
   param_units <- units_table$param_w_units[units_table$parameter == param]
+  upper_bound <- units_table$upper_bound[units_table$parameter == param]
+  lower_bound <- units_table$lower_bound[units_table$parameter == param]
   
-  data_plot <- ggplot(subset%>%filter(parameter == param), aes(x = DT_round_MT, y = mean, color = site)) +
-        geom_line()+
+  if(is.null(param_units)){
+    stop("Parameter not found in units table. Please select from ", units_table$parameter)
+  }
+  
+  sites <- c(paste0(site_sel,"_fc"), site_sel)
+
+    single_param <- sensor_df %>% 
+    filter(site %in% sites, parameter == param,
+           between(DT_round, start_dt, end_dt))%>%
+      distinct(DT_round, site, parameter, mean, .keep_all = T)%>%
+    select(site, DT_round, parameter, mean := !!sym(data_col))%>%
+    mutate(site = ifelse(site == site_sel, "ROSS In-Situ", "FC YSI"), 
+           mean = case_when(mean > upper_bound ~ NA,
+                            mean < lower_bound ~ NA,
+                            TRUE ~ mean))
+  
+  
+  data_plot <- ggplot(single_param, aes(x = DT_round, y = mean, color = site)) +
+    geom_line()+
     #TODO: add in grab samples as "truth" for SC, Turb, pH and chla (may want to normalize chla before hand)
-         # geom_point(data = plot_water_chem,
-         #     aes(x = DT_round, y = TOC, shape = collector, color = "Sample Values")) +
-        labs(
-             x = "Date",
-             y = param_units, 
-             color = "Site")+
+    # geom_point(data = plot_water_chem,
+    #     aes(x = DT_round, y = TOC, shape = collector, color = "Sample Values")) +
+    labs(
+      x = "Date",
+      y = param_units, 
+      color = "Site")+
     scale_color_manual(values = ROSS_lt_pal)+
     ROSS_theme
-
-  comp_data <- subset %>%
-  pivot_wider(id_cols = c(parameter, DT_round_MT), 
-              names_from = site, 
-              values_from = mean) %>%
-  mutate(difference =  `PBR ROSS`- `PBR FC`,
-         percent_difference = (`PBR ROSS`- `PBR FC`) / `PBR FC` * 100, 
-         cat = case_when(percent_difference > 0 ~  "PBR ROSS > PBR FC", 
-                         percent_difference < 0 ~ "PBR ROSS < PBR FC", 
-                         percent_difference == 0 ~ "Equal",
-                         is.na(percent_difference) ~ "No Data"))
   
-  comp_plot_abs <- ggplot(comp_data%>%filter(parameter == param), aes(x = DT_round_MT, y = difference, color = cat)) +
+  comp_data <- single_param%>%
+    #distinct(site, parameter, DT_round, mean, .keep_all = T) %>%
+    pivot_wider(id_cols = c(parameter, DT_round), 
+                names_from = site, 
+                values_from = mean) %>%
+    mutate(difference =  `ROSS In-Situ`- `FC YSI`,
+           percent_difference = (`ROSS In-Situ`- `FC YSI`) / `FC YSI` * 100, 
+           cat = case_when(percent_difference > 0 ~  "ROSS In-Situ > FC YSI", 
+                           percent_difference < 0 ~ "ROSS In-Situ < FC YSI", 
+                           percent_difference == 0 ~ "Equal",
+                           is.na(percent_difference) ~ "No Data"))
+  
+  comp_plot_abs <- ggplot(comp_data, aes(x = DT_round, y = difference, color = cat)) +
     geom_point() +
     geom_hline(yintercept = 0, linetype = "solid", color = "black") +
-    labs(title = paste("Comparison of PBR ROSS and PBR FC", param),
+    labs(
          x = "", 
-         y = paste0("Absolute Difference for ", param_units), 
+         y = paste0("Absolute Difference for\n", param_units), 
          color = "Difference Category") +
     scale_color_manual(values = ROSS_acc_pal)+
     ROSS_theme
   
-  comp_plot_perc <- ggplot(comp_data%>%filter(parameter == param), aes(x = DT_round_MT, y = percent_difference, color = cat)) +
+  comp_plot_perc <- ggplot(comp_data, aes(x = DT_round, y = percent_difference, color = cat)) +
     geom_point() +
     geom_hline(yintercept = 0, linetype = "solid", color = "black") +
     labs(x = "Date",
-         y = paste0("Percent Difference for ", param ), 
+         y = paste0("Percent Difference for\n", param ), 
          color = "Difference Category") +
     scale_color_manual(values = ROSS_acc_pal)+
     ROSS_theme
-      
-  plot_list[[param]] <- data_plot+ comp_plot_abs+ comp_plot_perc +
-                                   plot_layout(ncol = 3, nrow = 1, 
-                                    guides = "collect")
   
+   list(data_plot = data_plot, 
+                    comp_plot_abs = comp_plot_abs,
+                    comp_plot_perc = comp_plot_perc)
   
-}
+} 
 
-print(plot_list)
-      
+```
 
-ggsave("data/upper_clp_dss/figures/ROSS_FC_turb_comparison.png", 
-       plot = plot_list$Turbidity,
-       width = 10, height = 6, units = "in", dpi = 300)
-ggsave("data/upper_clp_dss/figures/ROSS_FC_temp_comparison.png", 
-       plot = plot_list$Temperature,
-       width = 10, height = 6, units = "in", dpi = 300)
-ggsave("data/upper_clp_dss/figures/ROSS_FC_ph_comparison.png", 
-       plot = plot_list$pH,
-       width = 10, height = 6, units = "in", dpi = 300)
+## Poudre @ Rustic
 
-ggsave("data/upper_clp_dss/figures/ROSS_FC_sc_comparison.png", 
-       plot = plot_list$`Specific Conductivity`,
+```{r}
+all_pbr_comparisons <- map(c("Turbidity", "pH", "Chl-a Fluorescence", "Specific Conductivity", "DO"), 
+                       ~create_comparison_plots(param = .x, site_sel = "pbr"))%>%set_names(c("Turbidity", "pH", "Chl-a Fluorescence", "Specific Conductivity", "DO"))
+
+all_pbr_single_plot <- map(all_pbr_comparisons, 
+                             ~wrap_plots(.x$data_plot + ggtitle(paste("Comparison of In-Situ & YSI ", .x$data_plot$labels$y, " at Poudre @ Rustic")),
+                                         .x$comp_plot_abs ,
+                                         .x$comp_plot_perc,
+                                                        ncol = 1))%>%
+  set_names(c("Turbidity", "pH", "Chl-a Fluorescence", "Specific Conductivity", "DO"))
+
+all_pbr_single_plot$Turbidity
+
+
+
+all_pbr_single_plot$DO
+# 
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pbr_turb_comparison_2025.png"),
+       plot = all_pbr_single_plot$Turbidity,
+       width = 10, height = 6, units = "in", dpi = 300)
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pbr_do_comparison_2025.png"),
+       plot = all_pbr_single_plot$DO,
+       width = 10, height = 6, units = "in", dpi = 300)
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pbr_pH_comparison_2025.png"),
+       plot = all_pbr_single_plot$pH,
+       width = 10, height = 6, units = "in", dpi = 300)
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pbr_chla_comparison_2025.png"),
+       plot = all_pbr_single_plot$`Chl-a Fluorescence`,
+       width = 10, height = 6, units = "in", dpi = 300)
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pbr_sc_comparison_2025.png"),
+       plot = all_pbr_single_plot$`Specific Conductivity`,
        width = 10, height = 6, units = "in", dpi = 300)
 ```
+
+## Poudre @ Manners
+```{r}
+all_pman_comparisons <- map(c("Turbidity", "pH", "Chl-a Fluorescence", "Specific Conductivity", "DO"), 
+                       ~create_comparison_plots(param = .x, site_sel = "pman"))%>%set_names(c("Turbidity", "pH", "Chl-a Fluorescence", "Specific Conductivity", "DO"))
+
+all_pman_single_plot <- map(all_pman_comparisons, 
+                             ~wrap_plots(.x$data_plot + ggtitle(paste("Comparison of In-Situ & YSI ", .x$data_plot$labels$y, " at Poudre @ Manners")),
+                                         .x$comp_plot_abs ,
+                                         .x$comp_plot_perc,
+                                                        ncol = 1))%>%
+  set_names(c("Turbidity", "pH", "Chl-a Fluorescence", "Specific Conductivity", "DO"))
+all_pman_single_plot$Turbidity
+all_pman_single_plot$DO
+
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pman_turb_comparison_2025.png"),
+       plot = all_pman_single_plot$Turbidity,
+       width = 10, height = 6, units = "in", dpi = 300)
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pman_do_comparison_2025.png"),
+       plot = all_pman_single_plot$DO,
+       width = 10, height = 6, units = "in", dpi = 300)
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pman_pH_comparison_2025.png"),
+       plot = all_pman_single_plot$pH,
+       width = 10, height = 6, units = "in", dpi = 300)
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pman_chla_comparison_2025.png"),
+       plot = all_pman_single_plot$`Chl-a Fluorescence`,
+       width = 10, height = 6, units = "in", dpi = 300)
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pman_sc_comparison_2025.png"),
+       plot = all_pman_single_plot$`Specific Conductivity`,
+       width = 10, height = 6, units = "in", dpi = 300)
+
+```
+
+
+
+
+
+# Create datasets to share with FC
+
+```{r}
+source("src/sensor_qaqc//apply_low_pass_binomial_filter.R")
+
+sensor_trim <- sensor_data%>%
+  apply_low_pass_binomial_filter(.,new_value_col = "raw_smoothed")%>%
+    mutate(DT_MST = as.character(DT_round))%>%
+  select(site, DT_MST, parameter, raw = mean, raw_smoothed, cleaned = mean_cleaned,flag = clean_flag, cleaned_smoothed = mean_smoothed)
+
+write_csv(sensor_trim, here("2025_insitu_ysi_sensor_data.csv"))
+
+sensor_trim_wide <- sensor_trim%>%
+  filter(parameter %in% c("Turbidity"))%>%
+  select(-flag)%>%
+  #pivot wider so we can have the raw, cleaned and smoothed values in separate columns for each site
+  pivot_wider(id_cols = c(DT_MST, parameter),
+              names_from = site,
+              values_from = c(raw, raw_smoothed, cleaned, cleaned_smoothed)
+  )
+
+write_csv(sensor_trim_wide, here("2025_insitu_ysi_turbidity_data.csv"))
+
+
+```
+
+# Comparing Cleaning
+
+```{r}
+sensor_trim <- sensor_trim%>%
+  mutate(DT_round = as.POSIXct(DT_MST, tz = "MST", format = "%Y-%m-%d %H:%M:%S"))%>%
+  mutate(mean = raw)
+
+    units_table <- data.frame(parameter = c("Turbidity", "pH", "Chl-a Fluorescence", "Specific Conductivity", "DO", "Temperature"),
+                            units = c("NTU", "pH", "RFU", "uS/cm", "mg/L", "C"), 
+                            param_w_units = c("Turbidity (NTU)", "pH", "ChlA (RFU)", "Specific Conductivity (uS/cm)", "DO (mg/L)", "Temperature ( C )"), 
+                            lower_bound = c(0, 6, 0, 0, 6, -5),
+                            upper_bound = c(1000, 11, 20, 150, 15, 30))
+
+data_plot <- function(dt_col = "DT_round", data_col = "raw", param = "Turbidity", site_sel = "pbr"){
+  
+  plot_data <- sensor_trim%>%filter(grepl(site_sel, site) & !!sym(data_col) > 0 & parameter == param)%>%
+    mutate(site = ifelse(site == site_sel, "ROSS In-Situ", "FC YSI"))
+  
+  ggplot(plot_data, aes(x = !!sym(dt_col), y =  !!sym(data_col), color = site)) +
+    geom_line()+
+    scale_color_manual(values = ROSS_lt_pal)+
+    labs(
+      x = "Date",
+      y = paste0(param, " (", units_table$units[units_table$parameter == param], ")"), 
+      color = "Site")
+
+  }
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pbr_turb_cleaning_comparison_2025.png"),
+       plot = wrap_plots(
+         data_plot(data_col = "raw", site_sel = "pbr") + ggtitle("Raw Data"), 
+         data_plot(data_col = "raw_smoothed", site_sel = "pbr") + ggtitle("Raw Smoothed Data"),
+         data_plot(data_col = "cleaned", site_sel = "pbr") + ggtitle("Cleaned Data (ROSS:Manual, FC: Auto QAQC)"),
+         data_plot(data_col = "cleaned_smoothed", site_sel = "pbr")+ggtitle("Cleaned + Smoothed Data"), 
+         ncol = 1,guides = "collect"
+       )+ plot_annotation(title = "Comparison of Cleaning Methods for Turbidity at Poudre @ Rustic",
+                       theme = theme(plot.title = element_text(size = 16, face = "bold"))),
+       width = 10, height = 12, units = "in", dpi = 300)
+
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pman_turb_cleaning_comparison_2025.png"),
+       plot = wrap_plots(
+         data_plot(data_col = "raw", site_sel = "pman") + ggtitle("Raw Data"), 
+         data_plot(data_col = "raw_smoothed", site_sel = "pman") + ggtitle("Raw Smoothed Data"),
+         data_plot(data_col = "cleaned", site_sel = "pman") + ggtitle("Cleaned Data (ROSS:Manual, FC: Auto QAQC)"),
+         data_plot(data_col = "cleaned_smoothed", site_sel = "pman")+ggtitle("Cleaned + Smoothed Data"), 
+         ncol = 1,guides = "collect"
+       )+ plot_annotation(title = "Comparison of Cleaning Methods for Turbidity at Poudre @ Manners",
+                       theme = theme(plot.title = element_text(size = 16, face = "bold"))),
+       width = 10, height = 12, units = "in", dpi = 300)
+         
+         
+```
+
+## Create a plot of data on a 1:1 line with log scaling
+
+### PBR
+
+```{r}
+raw_pbr <- sensor_trim_wide%>%mutate(date = as.Date(DT_MST))%>%
+ggplot(., aes(raw_pbr, raw_pbr_fc, color = date)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "In Situ Turbidity (NTU)", 
+       y = "YSI Turbidity (NTU)", 
+       color = "Date", 
+       title = "Raw")
+  
+
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pbr_turb_1to1_comparison_2025.png"),
+       width = 8, height = 6, units = "in", dpi = 300)
+
+smoothed_pbr <- sensor_trim_wide%>%mutate(date = as.Date(DT_MST))%>%
+ggplot(., aes(x = raw_smoothed_pbr , raw_smoothed_pbr_fc, color = date)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "In Situ Turbidity (NTU)", 
+       y = "YSI Turbidity (NTU)", 
+       color = "Date", title = "Smoothed")
+
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pbr_turb_1to1_smoothed_comparison_2025.png"),
+       width = 8, height = 6, units = "in", dpi = 300)
+
+clean_smooth_pbr <- sensor_trim_wide%>%mutate(date = as.Date(DT_MST))%>%
+ggplot(., aes(x = cleaned_smoothed_pbr , y = cleaned_smoothed_pbr_fc, color = date)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "In Situ Turbidity (NTU)", 
+       y = "YSI Turbidity (NTU)", 
+       color = "Date", title = "Cleaned + Smoothed")
+
+wrap_plots(raw_pbr, smoothed_pbr, clean_smooth_pbr, ncol = 1, guides = "collect") + plot_annotation(title = "PBR 1:1 Comparison of Turbidity Measurements with Different Cleaning Methods",
+                                                                                                      theme = theme(plot.title = element_text(size = 16, face = "bold")))
+
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "pbr_turb_1to1_comparison_2025.png"),
+       width = 12, height = 12, units = "in", dpi = 300)
+
+
+```
+
+### PMAN
+
+```{r}
+raw_pman <- sensor_trim_wide%>%mutate(date = as.Date(DT_MST))%>%
+ggplot(., aes(raw_pman, raw_pman_fc, color = date)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "In Situ Turbidity (NTU)", 
+       y = "YSI Turbidity (NTU)", 
+       color = "Date", 
+       title = "Raw")
+
+smoothed_pman <- sensor_trim_wide%>%mutate(date = as.Date(DT_MST))%>%
+ggplot(., aes(x = raw_smoothed_pman , raw_smoothed_pman_fc, color = date)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "In Situ Turbidity (NTU)", 
+       y = "YSI Turbidity (NTU)", 
+       color = "Date", title = "Smoothed")
+
+clean_smooth_pman <- sensor_trim_wide%>%mutate(date = as.Date(DT_MST))%>%
+ggplot(., aes(x = cleaned_smoothed_pman , y = cleaned_smoothed_pman_fc, color = date)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "In Situ Turbidity (NTU)", 
+       y = "YSI Turbidity (NTU)", 
+       color = "Date", title = "Cleaned + Smoothed")
+
+wrap_plots(raw_pman, smoothed_pman, clean_smooth_pman, ncol = 1, guides = "collect") + plot_annotation(title = "Manners 1:1 Comparison of Turbidity Measurements with Different Cleaning Methods",
+                                                                                                      theme = theme(plot.title = element_text(size = 16, face = "bold")))
+
+ggsave(here("docs", "uclp_dss", "figs", "ysi_insitu_comparison", "manners_turb_1to1_comparison_2025.png"),
+       width = 12, height = 12, units = "in", dpi = 300)
+```
+
+
