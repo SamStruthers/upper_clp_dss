@@ -123,19 +123,27 @@ generate_fc_grab_sample_data <- function(
   chem_data <- map(
     chem_data_raw,
     function(df) {
+
+      site_name_col <- ifelse("LongDesc" %in% colnames(df), "LongDesc",
+                              ifelse("Location Name" %in% colnames(df), "Location Name",
+                                     ifelse("ShortDesc" %in% colnames(df), "ShortDesc", NA)))
+      if (is.na(site_name_col)) {
+        stop("No recognized site name column found in the chemistry data. Expected one of: LongDesc, Location Name, ShortDesc.")
+      }
+
       df %>%
         select(
           # DT columns
           Date = any_of(c("Date", "Sampled Date")),
           # ID columns
-          site_name = any_of(c("LongDesc", "Location Name")),
+          site_name = !!sym(site_name_col),
           # TOC and Chemical Data Columns
-          TOC = any_of(c("TOC", "Corrected Result")),
-          NO3 = any_of(c("NO3_N")),
+          TOC = any_of(c("TOC", "Total Organic Carbon",  "Corrected Result")),
+          NO3 = any_of(c("NO3_N", "Nitrate as N" )),
           SC = any_of(c("TDS")),
-          Cl = any_of(c("Cl")),
+          Cl = any_of(c("Cl", "Chloride")),
           lab_turb = any_of(c("Turbidity")),
-          TN = any_of(c("TN_calc")),
+          TN = any_of(c("TN_calc", "Total Nitrogen")),
           Alkalinity = any_of(c("Alkalinity")),
           pH = any_of(c("pH"))
         ) %>%

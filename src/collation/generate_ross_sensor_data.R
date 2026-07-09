@@ -91,8 +91,8 @@
 #' apply_timestep_median() and read_ext()
 #'
 
-generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","manual_data_verification"),
-                                      output_directory = here("data", "collated", "sensor"),
+generate_ross_sensor_data <- function(data_dir = here::here("data","raw", "sensor","manual_data_verification"),
+                                      output_directory = here::here("data", "collated", "sensor"),
                                       update_data = FALSE){
 
   #---- Sourcing functions ----
@@ -101,6 +101,13 @@ generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","ma
   source("src/sensor_qaqc/apply_interpolation_missing_data.R")
   source("src/sensor_qaqc/apply_low_pass_binomial_filter.R")
   source("src/sensor_qaqc/apply_timestep_median.R")
+
+  # Packages required for this function
+  require(tidyverse)
+  require(arrow)
+  require(here)
+  require(data.table)
+
 
   # Argument checks ----
   #check that data_dir exists
@@ -117,6 +124,7 @@ generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","ma
   years <- gsub("_cycle", "", basename(folders))
 
   cleaned_data <- map(years, function(year){
+    post_ver = F
     #get the correct folder for the year
     path <- map2(year, data_dir, function(year, data_dir){
       #check to see if cycle exists
@@ -133,9 +141,7 @@ generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","ma
           #message(paste("No post verification data found for year", year, ", moving to in_progress"))
         }else{
           #message(paste("Reading in post_verification data for year", year))
-          path <- list(path =  file.path(data_dir, paste0(year, "_cycle"), "post_verification"),
-                       status = "post_verification")
-          return(path)
+          post_ver = T
         }
       }
 
@@ -146,8 +152,11 @@ generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","ma
           #message(paste("No in progress verification data found for year", year, ", moving to autoqaqc/raw data"))
 
         }else{
-          path <- list(path =  file.path(data_dir, paste0(year, "_cycle"), "in_progress"),
-                       status = "in_progress")
+
+            path <- list(path =  file.path(data_dir, paste0(year, "_cycle"), "in_progress"),
+                         status = "in_progress",
+                         post_ver  = post_ver)
+
           return(path)
         }
       }
@@ -232,6 +241,61 @@ generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","ma
     #---- In Progress folder ----
     # Preferentially using verified data where available, otherwise using pre-verified data with cleaning filters applied
     if(path$status %in% c("in_progress")){
+
+      #Check if post_ver == T
+      if(!is.null(path$post_ver) && path$post_ver == T){
+        message("Post verification data also present for this year, using post verification data where available and in_progress elsewhere")
+        post_ver_path <- gsub(x = path$path, pattern = "in_progress", replacement = "post_verification")
+        post_verified_names <- list.files(path = post_ver_path, full.names = T)
+
+        message("Reading in post-verified data from post_verification folder")
+        post_verified_dataset <- post_verified_names %>%
+          map(\(file_path){
+            site_parameter_df <- read_ext(file_path)
+            return(site_parameter_df)
+          }) %>%
+          set_names(map_chr(., ~ paste0(unique(.x$site), "-", unique(.x$parameter))))%>%
+          keep(., ~nrow(.x) > 0) #remove any empty datasets
+
+        #Get names of verified datasets
+        verified_names_all <- list.files(here(path$path, "verified_directory"), full.names = TRUE)
+        # Filter out any names that are already in the verified dataset
+        verified_names <- verified_names_all %>%
+          keep(\(f) {
+            fname <- basename(f)
+            !any(str_detect(fname, fixed(names(post_verified_dataset))))
+          })
+        message("Reading in verified data from verified_directory")
+        verified_dataset <- verified_names %>%
+          map(\(file_path){
+            site_parameter_df <- read_ext(file_path)
+            return(site_parameter_df)
+          }) %>%
+          set_names(map_chr(., ~ paste0(unique(.x$site), "-", unique(.x$parameter))))%>%
+          keep(., ~nrow(.x) > 0) #remove any empty datasets
+
+        #Get names of all datasets
+        all_data_directory_names <- list.files(here(path$path, "all_data_directory"), full.names = TRUE)
+        # Filter out any names that are already in the verified dataset
+        names_to_filter <- c(names(verified_dataset), names(post_verified_dataset))
+
+        pre_verified_names <- all_data_directory_names %>%
+          keep(\(f) {
+            fname <- basename(f)
+            !any(str_detect(fname, fixed(names_to_filter)))
+          })
+
+        message("Reading in pre-verified data from all_data_directory")
+        pre_verified_dataset <- pre_verified_names %>%
+          map(\(file_path){
+            site_parameter_df <- read_ext(file_path)
+            return(site_parameter_df)
+          }) %>%
+          set_names(map_chr(., ~ paste0(unique(.x$site), "-", unique(.x$parameter))))%>%
+          keep(., ~nrow(.x) > 0) #remove any empty datasets
+
+      }else{
+
       message("Reading in verified data from verified_directory")
       verified_names <- list.files(here(path$path, "verified_directory"), full.names = T)
 
@@ -259,14 +323,16 @@ generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","ma
         }) %>%
         set_names(map_chr(., ~ paste0(unique(.x$site), "-", unique(.x$parameter))))%>%
         keep(., ~nrow(.x) > 0) #remove any empty datasets
+      }
 
       # Changes due to manual verification differences by year
       #2023 had a different manual verification protocol (which will not need to be repeated this way)
       if(year %in% c(2023, "2023")){
         message("Applying data cleaning")
         #Applying cleaning to verified data
-        verified_df <-  verified_dataset%>%
+        verified_df <-  c(verified_dataset, post_verified_dataset)%>%
           bind_rows()%>%
+          data.table() %>%
           mutate(
             #only accept data that is:
             #marked as PASS if a flag is absent
@@ -289,6 +355,7 @@ generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","ma
         #Applying cleaning filters to pre-verified data (it is essentially autoqa_qc data)
         pre_verified_df <- pre_verified_dataset%>%
           bind_rows()%>%
+          data.table() %>%
           add_column_if_not_exists(., "mal_flag", NA_character_) %>%
           rename(auto_flag = flag) %>%
           #applying cleaning filters to pre-verified data
@@ -298,6 +365,7 @@ generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","ma
 
         #Bind datasets and process
         cleaned_data <- bind_rows(verified_df, pre_verified_df)%>%
+          data.table() %>%
           filter( !is.na(site), !is.na(parameter), !is.na(DT_round),
                   # Filter based on DT
                   DT_round >= as.POSIXct(paste0(year, "-01-01 00:00:00"), tz = "MST") &
@@ -312,34 +380,62 @@ generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","ma
       if(!year %in% c(2023, "2023")){
         message("Applying data cleaning")
         #Applying cleaning to verified data
-        verified_df <-  verified_dataset%>%
-          bind_rows()%>%
-          mutate(
-            #only accept data that is marked as PASS or FLAGGED, omit OMIT data
-            mean_cleaned = case_when(
-              verification_status == "OMIT"  ~ NA,
-              verification_status == "PASS" ~ mean,
-              verification_status == "FLAGGED" ~ mean
-            ),
-            # pass user designated flags through
-            clean_flag = case_when(
-              verification_status == "OMIT"  ~ NA,
-              verification_status == "PASS" ~  NA,
-              verification_status == "FLAGGED" ~ user_flag
-            ))%>%
-          select(DT_round, DT_join, site, parameter, mean, mean_cleaned, clean_flag, last_site_visit)%>%
-          mutate(status = "in_progress_verified")
+        if(length(verified_dataset) == 0){
+          message("No verified data found for this year, using post verification data where available and pre-verified data elsewhere")
+          verified_df <- list()%>%
+            bind_rows()
+        }else{
+          verified_df <-  verified_dataset%>%
+            bind_rows()%>%
+            data.table() %>%
+            mutate(
+              #only accept data that is marked as PASS or FLAGGED, omit OMIT data
+              mean_cleaned = case_when(
+                verification_status == "OMIT"  ~ NA,
+                verification_status == "PASS" ~ mean,
+                verification_status == "FLAGGED" ~ mean
+              ),
+              # pass user designated flags through
+              clean_flag = case_when(
+                verification_status == "OMIT"  ~ NA,
+                verification_status == "PASS" ~  NA,
+                verification_status == "FLAGGED" ~ user_flag
+              ))%>%
+            select(DT_round, DT_join, site, parameter, mean, mean_cleaned, clean_flag, last_site_visit)%>%
+            mutate(status = "in_progress_verified")
+        }
+
 
         #Applying cleaning filters to pre-verified data (it is essentially autoqa_qc data)
         pre_verified_df <- pre_verified_dataset%>%
           bind_rows()%>%
+          data.table() %>%
           #applying cleaning filters to pre-verified data
           apply_cleaning_filters(df = ., new_value_col = "mean_cleaned") %>%
           select(DT_round, DT_join, site, parameter, mean_cleaned, clean_flag, last_site_visit)%>%
           mutate(status = "auto_flagged")
 
+        if(path$post_ver == TRUE){
+
+          post_verified_df <- post_verified_dataset%>%
+            bind_rows()%>%
+            data.table() %>%
+            select(DT_round, DT_join, site, parameter,
+                   #mean_drift_trans is the final cleaned column in the post verification datasets, it has had manual cleaning, and drift correction
+                   mean_cleaned = mean_drift_trans,
+                   clean_flag = user_flag,
+                   last_site_visit)
+          joined_data <- bind_rows(verified_df, pre_verified_df, post_verified_df)%>%
+            data.table()
+
+        }else{
+          joined_data <- bind_rows(verified_df, pre_verified_df)%>%
+            data.table()
+
+        }
+
+        cleaned_data <- joined_data%>%
         #Bind datasets and process
-        cleaned_data <- bind_rows(verified_df, pre_verified_df) %>%
           filter( !is.na(site), !is.na(parameter), !is.na(DT_round),
                   # Filter based on DT
                   DT_round >= as.POSIXct(paste0(year, "-01-01 00:00:00"), tz = "MST") &
@@ -352,38 +448,44 @@ generate_ross_sensor_data <- function(data_dir = here("data","raw", "sensor","ma
       }
     }
 
-    #---- Post Verification folder----
-    if(path$status %in% c("post_verification")){
-      message("Data in post_verification, no cleaning applied")
-      #get files
-      files <- list.files(path = path$path, full.names = T)
-      cleaned_data <- map(files, ~ read_ext(.x))%>%
-        bind_rows() %>%
-        data.table() %>%
-        #remove any obvious row errors/unusable data
-        filter( !is.na(site), !is.na(parameter), !is.na(DT_round))%>%
-        #converting to MST for later use
-        mutate(
-          DT_round = with_tz(DT_round, tz = "MST"),
-          DT_join = as.character(DT_round),
-          last_site_visit = with_tz(last_site_visit, "MST"),
-          mean = if_else(is.na(mal_flag), mean, NA) # remove reported sensor malfunctions
-        )%>%
-        filter(DT_round >= as.POSIXct(paste0(year, "-01-01 00:00:00"), tz = "MST") &
-                 DT_round <= as.POSIXct(paste0(year, "-12-31 23:59:59"), tz = "MST"))%>%
-        mutate(status = "post_verification")
-    }
     return(cleaned_data)
   })
 
   complete_dataset <- cleaned_data%>%
     keep(~!all(is.na(.x)))%>% #remove years without data
     bind_rows()%>%
+    data.table() %>%
     select(DT_round, site, parameter, mean, clean_flag, mean_cleaned, mean_filled, mean_smoothed, hourly_median, last_site_visit, status)%>%
     #fix any issues with site names
-    fix_site_names()%>%
+    ross.wq.tools::fix_site_names()%>%
     mutate(site = gsub(pattern = " virridy",replacement =  "_virridy",x =  site),
-           site = gsub("spring creek", "spring_creek", site))
+           site = gsub("spring creek", "spring_creek", site))%>%
+    #there are some parameters from the virridy sites that should be included in the main site datasets
+    #during specific windows based on when the sensors were deployed at the main sites vs the virridy sites.
+    #This is to avoid losing data during those windows while still using the virridy tags to identify where the data came from and to avoid overflagging data outside of those windows.
+    mutate(
+      #keep fDOM and Chl-a from riverbend and cottonwood sites from 9/2023 and 12/2024
+
+      is_archery_window = str_detect(site, "archery_virridy") &
+        between(DT_round, ymd_hms("2023-09-01 00:00:00", tz = "MST"), ymd_hms("2024-12-31 23:59:59", tz = "MST")),
+      #keep fDOM and Chl-a from riverbend and cottonwood sites from 9/2023 and 5/2024
+
+      is_river_cotton_window = str_detect(site, "riverbend_virridy|cottonwood_virridy") &
+        between(DT_round, ymd_hms("2023-09-01 00:00:00", tz = "MST"), ymd_hms("2024-05-31 23:59:59", tz = "MST")),
+      site = if_else(is_archery_window | is_river_cotton_window, str_remove(site, "_virridy"), site)
+    ) %>%
+    filter(
+      !(is_archery_window & !parameter %in% c("Turbidity", "FDOM Fluorescence", "Chl-a Fluorescence")),
+      !(is_river_cotton_window & !parameter %in% c("FDOM Fluorescence", "Chl-a Fluorescence")),
+      !(str_detect(site, "^archery$") &
+          between(DT_round, ymd_hms("2023-09-01 00:00:00", tz = "MST"), ymd_hms("2024-12-31 23:59:59", tz = "MST")) &
+          parameter == "Chl-a Fluorescence" &
+          !is_archery_window),
+      site %nin% c("archery_virridy", "riverbend_virridy", "cottonwood_virridy")
+    )%>%
+    #remove helper functions
+    select(-is_archery_window, -is_river_cotton_window)
+
   #---- Saving updated cleaned data ----
   if(update_data){
     date <- Sys.Date()
