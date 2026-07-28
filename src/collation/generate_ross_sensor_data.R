@@ -246,7 +246,7 @@ generate_ross_sensor_data <- function(data_dir = here::here("data","raw", "senso
       if(!is.null(path$post_ver) && path$post_ver == T){
         message("Post verification data also present for this year, using post verification data where available and in_progress elsewhere")
         post_ver_path <- gsub(x = path$path, pattern = "in_progress", replacement = "post_verification")
-        post_verified_names <- list.files(path = post_ver_path, full.names = T)
+        post_verified_names <- list.files(path = post_ver_path, full.names = T, pattern = ".parquet|.csv|.rds")
 
         message("Reading in post-verified data from post_verification folder")
         post_verified_dataset <- post_verified_names %>%
@@ -408,23 +408,32 @@ generate_ross_sensor_data <- function(data_dir = here::here("data","raw", "senso
 
         #Applying cleaning filters to pre-verified data (it is essentially autoqa_qc data)
         pre_verified_df <- pre_verified_dataset%>%
-          bind_rows()%>%
-          data.table() %>%
-          #applying cleaning filters to pre-verified data
-          apply_cleaning_filters(df = ., new_value_col = "mean_cleaned") %>%
-          select(DT_round, DT_join, site, parameter, mean_cleaned, clean_flag, last_site_visit)%>%
-          mutate(status = "auto_flagged")
+          bind_rows()
+        if(nrow(pre_verified_df) > 0 ){
+          pre_verified_df <- pre_verified_df %>%
+            data.table() %>%
+            #applying cleaning filters to pre-verified data
+            apply_cleaning_filters(df = ., new_value_col = "mean_cleaned") %>%
+            select(DT_round, DT_join, site, parameter, mean_cleaned, clean_flag, last_site_visit)%>%
+            mutate(status = "auto_flagged")
+        }
+
 
         if(path$post_ver == TRUE){
 
           post_verified_df <- post_verified_dataset%>%
-            bind_rows()%>%
-            data.table() %>%
-            select(DT_round, DT_join, site, parameter,
-                   #mean_drift_trans is the final cleaned column in the post verification datasets, it has had manual cleaning, and drift correction
-                   mean_cleaned = mean_drift_trans,
-                   clean_flag = user_flag,
-                   last_site_visit)
+            #trim down to a few columns
+            map(\(df) select(df,
+                             DT_round,
+                             DT_join,
+                             site,
+                             parameter,
+                             mean_cleaned = mean_drift_trans,
+                             clean_flag = user_flag,
+                             last_site_visit)) %>%
+            list_rbind() %>%
+            as.data.table()
+
           joined_data <- bind_rows(verified_df, pre_verified_df, post_verified_df)%>%
             data.table()
 

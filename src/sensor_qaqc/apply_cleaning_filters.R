@@ -23,9 +23,13 @@ apply_cleaning_filters <- function(df, value_col = "mean", new_value_col = "mean
 
   # Apply QA/QC
    df %>%
+    #if mal flag doesn't exist, add it and make it NA
+    add_column_if_not_exists(., column_name = "mal_flag")%>%
+    add_column_if_not_exists(., column_name = "auto_flag")%>%
     mutate(
       !!sym(new_value_col) := case_when(
         !is.na(mal_flag) ~ NA,
+        is.na(!!sym(value_col))  ~ NA,
         !!sym(value_col) <= 0 ~ NA,  # Remove non-positive values
         !is.na(auto_flag) & str_detect(auto_flag, regex("outside of sensor specification range", ignore_case = TRUE)) ~ NA, # Anything outside of sensor spec ranges should be removed
         !is.na(auto_flag) & parameter == "FDOM Fluorescence" & auto_flag == "drift" ~ !!sym(value_col), # FDOM sensor over flagged for downwards drift
