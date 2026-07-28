@@ -31,8 +31,11 @@ invisible(
     "RcppRoll",
     "trend",
     "xgboost",
+    "SHAPforxgboost",
     "scales",
     "slider",
+    "Metrics",
+    "glue",
     # Spatial packages
     "sf",
     "nhdplusTools",
@@ -51,6 +54,8 @@ invisible(
     "ggbeeswarm",
     "plotly",
     "ggpmisc",
+    "grid",
+    "gridExtra",
     # Web scraping/data retrieval
     "rvest",
     "httr",
