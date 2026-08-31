@@ -811,7 +811,7 @@ real_time_preds_2026 %>%
              aes(x = date, y = mean_TOC), color = "black", size = 1.5) +
   scale_color_date( name = "Forecast Run") +
   scale_fill_date( name = "Forecast Run") +
-  facet_wrap(~ model) +
+  facet_wrap(model ~ .) +
   theme(
     legend.position = "right",
     panel.grid.minor = element_blank(),
